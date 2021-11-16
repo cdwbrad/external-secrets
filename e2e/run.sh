@@ -13,9 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-set -o errexit
-set -o nounset
-set -o pipefail
+set -euo pipefail
 
 if ! command -v kind --version &> /dev/null; then
   echo "kind is not installed. Use the package manager or visit the official site https://kind.sigs.k8s.io/"
@@ -56,7 +54,17 @@ kubectl run --rm \
   --env="GCP_PROJECT_ID=${GCP_PROJECT_ID:-}" \
   --env="AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}" \
   --env="AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}" \
+  --env="AKEYLESS_ACCESS_ID=${AKEYLESS_ACCESS_ID:-}" \
+  --env="AKEYLESS_ACCESS_TYPE=${AKEYLESS_ACCESS_TYPE:-}" \
+  --env="AKEYLESS_ACCESS_TYPE_PARAM=${AKEYLESS_ACCESS_TYPE_PARAM:-}" \
   --env="TENANT_ID=${TENANT_ID:-}" \
   --env="VAULT_URL=${VAULT_URL:-}" \
+  --env="GITLAB_TOKEN=${GITLAB_TOKEN:-}" \
+  --env="GITLAB_PROJECT_ID=${GITLAB_PROJECT_ID:-}" \
+  --env="ORACLE_USER_OCID=${ORACLE_USER_OCID:-}" \
+  --env="ORACLE_TENANCY_OCID=${ORACLE_TENANCY_OCID:-}" \
+  --env="ORACLE_REGION=${ORACLE_REGION:-}" \
+  --env="ORACLE_FINGERPRINT=${ORACLE_FINGERPRINT:-}" \
+  --env="ORACLE_KEY=${ORACLE_KEY:-}" \
   --overrides='{ "apiVersion": "v1", "spec":{"serviceAccountName": "external-secrets-e2e"}}' \
   e2e --image=local/external-secrets-e2e:test

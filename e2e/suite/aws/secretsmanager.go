@@ -11,6 +11,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package aws
 
 import (
@@ -125,5 +126,7 @@ var _ = Describe("[aws] ", func() {
 		Entry(common.DataPropertyDockerconfigJSON(f)),
 		Entry(common.SSHKeySync(f)),
 		Entry(common.SSHKeySyncDataProperty(f)),
+		Entry(common.SyncWithoutTargetName(f)),
+		Entry(common.JSONDataWithoutTargetName(f)),
 	)
 })

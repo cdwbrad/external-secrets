@@ -103,6 +103,10 @@ type ExternalSecretTarget struct {
 	// Template defines a blueprint for the created Secret resource.
 	// +optional
 	Template *ExternalSecretTemplate `json:"template,omitempty"`
+
+	// Immutable defines if the final secret will be immutable
+	// +optional
+	Immutable bool `json:"immutable,omitempty"`
 }
 
 // ExternalSecretData defines the connection between the Kubernetes Secret key (spec.data.<key>) and the Provider data.
@@ -151,7 +155,8 @@ type ExternalSecretSpec struct {
 type ExternalSecretConditionType string
 
 const (
-	ExternalSecretReady ExternalSecretConditionType = "Ready"
+	ExternalSecretReady   ExternalSecretConditionType = "Ready"
+	ExternalSecretDeleted ExternalSecretConditionType = "Deleted"
 )
 
 type ExternalSecretStatusCondition struct {
@@ -173,6 +178,8 @@ const (
 	ConditionReasonSecretSynced = "SecretSynced"
 	// ConditionReasonSecretSyncedError indicates that there was an error syncing the secret.
 	ConditionReasonSecretSyncedError = "SecretSyncedError"
+	// ConditionReasonSecretDeleted indicates that the secret has been deleted.
+	ConditionReasonSecretDeleted = "SecretDeleted"
 )
 
 type ExternalSecretStatus struct {
@@ -195,6 +202,7 @@ type ExternalSecretStatus struct {
 // +kubebuilder:resource:scope=Namespaced,categories={externalsecrets},shortName=es
 // +kubebuilder:printcolumn:name="Store",type=string,JSONPath=`.spec.secretStoreRef.name`
 // +kubebuilder:printcolumn:name="Refresh Interval",type=string,JSONPath=`.spec.refreshInterval`
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 type ExternalSecret struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -202,6 +210,11 @@ type ExternalSecret struct {
 	Spec   ExternalSecretSpec   `json:"spec,omitempty"`
 	Status ExternalSecretStatus `json:"status,omitempty"`
 }
+
+const (
+	// AnnotationDataHash is used to ensure consistency.
+	AnnotationDataHash = "reconcile.external-secrets.io/data-hash"
+)
 
 // +kubebuilder:object:root=true
 

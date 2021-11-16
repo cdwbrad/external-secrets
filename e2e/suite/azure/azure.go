@@ -30,7 +30,11 @@ var _ = Describe("[azure] ", func() {
 	tenantID := os.Getenv("TENANT_ID")
 	clientID := os.Getenv("AZURE_CLIENT_ID")
 	clientSecret := os.Getenv("AZURE_CLIENT_SECRET")
-	prov := newazureProvider(f, clientID, clientSecret, tenantID, vaultURL)
+	prov := &azureProvider{}
+
+	if vaultURL != "" && tenantID != "" && clientID != "" && clientSecret != "" {
+		prov = newazureProvider(f, clientID, clientSecret, tenantID, vaultURL)
+	}
 
 	DescribeTable("sync secrets", framework.TableFunc(f, prov),
 		Entry(common.SimpleDataSync(f)),
@@ -42,5 +46,7 @@ var _ = Describe("[azure] ", func() {
 		Entry(common.DataPropertyDockerconfigJSON(f)),
 		Entry(common.SSHKeySync(f)),
 		Entry(common.SSHKeySyncDataProperty(f)),
+		Entry(common.SyncWithoutTargetName(f)),
+		Entry(common.JSONDataWithoutTargetName(f)),
 	)
 })

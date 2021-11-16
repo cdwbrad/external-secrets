@@ -66,14 +66,21 @@ const (
 
 	errGetKubeSecret = "cannot get Kubernetes secret %q: %w"
 	errSecretKeyFmt  = "cannot find secret data for key: %q"
+	errConfigMapFmt  = "cannot find config map data for key: %q"
 
 	errClientTLSAuth = "error from Client TLS Auth: %q"
+
+	errVaultRevokeToken = "error while revoking token: %w"
+
+	errUnknownCAProvider = "unknown caProvider type given"
 )
 
 type Client interface {
 	NewRequest(method, requestPath string) *vault.Request
 	RawRequestWithContext(ctx context.Context, r *vault.Request) (*vault.Response, error)
 	SetToken(v string)
+	Token() string
+	ClearToken()
 	SetNamespace(namespace string)
 }
 
@@ -155,7 +162,16 @@ func (v *client) GetSecretMap(ctx context.Context, ref esv1alpha1.ExternalSecret
 	return v.readSecret(ctx, ref.Key, ref.Version)
 }
 
-func (v *client) Close() error {
+func (v *client) Close(ctx context.Context) error {
+	// Revoke the token if we have one set and it wasn't sourced from a TokenSecretRef
+	if v.client.Token() != "" && v.store.Auth.TokenSecretRef == nil {
+		req := v.client.NewRequest(http.MethodPost, "/v1/auth/token/revoke-self")
+		_, err := v.client.RawRequestWithContext(ctx, req)
+		if err != nil {
+			return fmt.Errorf(errVaultRevokeToken, err)
+		}
+		v.client.ClearToken()
+	}
 	return nil
 }
 
@@ -220,14 +236,40 @@ func (v *client) newConfig() (*vault.Config, error) {
 	cfg := vault.DefaultConfig()
 	cfg.Address = v.store.Server
 
-	if len(v.store.CABundle) == 0 {
+	if len(v.store.CABundle) == 0 && v.store.CAProvider == nil {
 		return cfg, nil
 	}
 
 	caCertPool := x509.NewCertPool()
-	ok := caCertPool.AppendCertsFromPEM(v.store.CABundle)
-	if !ok {
-		return nil, errors.New(errVaultCert)
+
+	if len(v.store.CABundle) > 0 {
+		ok := caCertPool.AppendCertsFromPEM(v.store.CABundle)
+		if !ok {
+			return nil, errors.New(errVaultCert)
+		}
+	}
+
+	if v.store.CAProvider != nil {
+		var cert []byte
+		var err error
+
+		switch v.store.CAProvider.Type {
+		case esv1alpha1.CAProviderTypeSecret:
+			cert, err = getCertFromSecret(v)
+		case esv1alpha1.CAProviderTypeConfigMap:
+			cert, err = getCertFromConfigMap(v)
+		default:
+			return nil, errors.New(errUnknownCAProvider)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		ok := caCertPool.AppendCertsFromPEM(cert)
+		if !ok {
+			return nil, errors.New(errVaultCert)
+		}
 	}
 
 	if transport, ok := cfg.HttpClient.Transport.(*http.Transport); ok {
@@ -237,68 +279,152 @@ func (v *client) newConfig() (*vault.Config, error) {
 	return cfg, nil
 }
 
+func getCertFromSecret(v *client) ([]byte, error) {
+	secretRef := esmeta.SecretKeySelector{
+		Name:      v.store.CAProvider.Name,
+		Namespace: &v.store.CAProvider.Namespace,
+		Key:       v.store.CAProvider.Key,
+	}
+	ctx := context.Background()
+	res, err := v.secretKeyRef(ctx, &secretRef)
+	if err != nil {
+		return nil, fmt.Errorf(errVaultCert, err)
+	}
+
+	return []byte(res), nil
+}
+
+func getCertFromConfigMap(v *client) ([]byte, error) {
+	objKey := types.NamespacedName{
+		Namespace: v.store.CAProvider.Namespace,
+		Name:      v.store.CAProvider.Name,
+	}
+
+	configMapRef := &corev1.ConfigMap{}
+	ctx := context.Background()
+	err := v.kube.Get(ctx, objKey, configMapRef)
+	if err != nil {
+		return nil, fmt.Errorf(errVaultCert, err)
+	}
+
+	val, ok := configMapRef.Data[v.store.CAProvider.Key]
+	if !ok {
+		return nil, fmt.Errorf(errConfigMapFmt, v.store.CAProvider.Key)
+	}
+
+	return []byte(val), nil
+}
+
 func (v *client) setAuth(ctx context.Context, client Client, cfg *vault.Config) error {
+	tokenExists, err := setSecretKeyToken(ctx, v, client)
+	if tokenExists {
+		return err
+	}
+
+	tokenExists, err = setAppRoleToken(ctx, v, client)
+	if tokenExists {
+		return err
+	}
+
+	tokenExists, err = setKubernetesAuthToken(ctx, v, client)
+	if tokenExists {
+		return err
+	}
+
+	tokenExists, err = setLdapAuthToken(ctx, v, client)
+	if tokenExists {
+		return err
+	}
+
+	tokenExists, err = setJwtAuthToken(ctx, v, client)
+	if tokenExists {
+		return err
+	}
+
+	tokenExists, err = setCertAuthToken(ctx, v, client, cfg)
+	if tokenExists {
+		return err
+	}
+
+	return errors.New(errAuthFormat)
+}
+
+func setAppRoleToken(ctx context.Context, v *client, client Client) (bool, error) {
 	tokenRef := v.store.Auth.TokenSecretRef
 	if tokenRef != nil {
 		token, err := v.secretKeyRef(ctx, tokenRef)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
+func setSecretKeyToken(ctx context.Context, v *client, client Client) (bool, error) {
 	appRole := v.store.Auth.AppRole
 	if appRole != nil {
 		token, err := v.requestTokenWithAppRoleRef(ctx, client, appRole)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
+func setKubernetesAuthToken(ctx context.Context, v *client, client Client) (bool, error) {
 	kubernetesAuth := v.store.Auth.Kubernetes
 	if kubernetesAuth != nil {
 		token, err := v.requestTokenWithKubernetesAuth(ctx, client, kubernetesAuth)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
+func setLdapAuthToken(ctx context.Context, v *client, client Client) (bool, error) {
 	ldapAuth := v.store.Auth.Ldap
 	if ldapAuth != nil {
 		token, err := v.requestTokenWithLdapAuth(ctx, client, ldapAuth)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
+func setJwtAuthToken(ctx context.Context, v *client, client Client) (bool, error) {
 	jwtAuth := v.store.Auth.Jwt
 	if jwtAuth != nil {
 		token, err := v.requestTokenWithJwtAuth(ctx, client, jwtAuth)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
+	return false, nil
+}
 
+func setCertAuthToken(ctx context.Context, v *client, client Client, cfg *vault.Config) (bool, error) {
 	certAuth := v.store.Auth.Cert
 	if certAuth != nil {
 		token, err := v.requestTokenWithCertAuth(ctx, client, certAuth, cfg)
 		if err != nil {
-			return err
+			return true, err
 		}
 		client.SetToken(token)
-		return nil
+		return true, nil
 	}
-
-	return errors.New(errAuthFormat)
+	return false, nil
 }
 
 func (v *client) secretKeyRefForServiceAccount(ctx context.Context, serviceAccountRef *esmeta.ServiceAccountSelector) (string, error) {
@@ -415,43 +541,16 @@ func kubeParameters(role, jwt string) map[string]string {
 }
 
 func (v *client) requestTokenWithKubernetesAuth(ctx context.Context, client Client, kubernetesAuth *esv1alpha1.VaultKubernetesAuth) (string, error) {
-	jwtString := ""
-	if kubernetesAuth.ServiceAccountRef != nil {
-		jwt, err := v.secretKeyRefForServiceAccount(ctx, kubernetesAuth.ServiceAccountRef)
-		if err != nil {
-			return "", err
-		}
-		jwtString = jwt
-	} else if kubernetesAuth.SecretRef != nil {
-		tokenRef := kubernetesAuth.SecretRef
-		if tokenRef.Key == "" {
-			tokenRef = kubernetesAuth.SecretRef.DeepCopy()
-			tokenRef.Key = "token"
-		}
-		jwt, err := v.secretKeyRef(ctx, tokenRef)
-		if err != nil {
-			return "", err
-		}
-		jwtString = jwt
-	} else {
-		// Kubernetes authentication is specified, but without a referenced
-		// Kubernetes secret. We check if the file path for in-cluster service account
-		// exists and attempt to use the token for Vault Kubernetes auth.
-		if _, err := os.Stat(serviceAccTokenPath); err != nil {
-			return "", fmt.Errorf(errServiceAccount, err)
-		}
-		jwtByte, err := ioutil.ReadFile(serviceAccTokenPath)
-		if err != nil {
-			return "", fmt.Errorf(errServiceAccount, err)
-		}
-		jwtString = string(jwtByte)
+	jwtString, err := getJwtString(ctx, v, kubernetesAuth)
+	if err != nil {
+		return "", err
 	}
 
 	parameters := kubeParameters(kubernetesAuth.Role, jwtString)
 	url := strings.Join([]string{"/v1", "auth", kubernetesAuth.Path, "login"}, "/")
 	request := client.NewRequest("POST", url)
 
-	err := request.SetJSONBody(parameters)
+	err = request.SetJSONBody(parameters)
 	if err != nil {
 		return "", fmt.Errorf(errVaultReqParams, err)
 	}
@@ -474,6 +573,39 @@ func (v *client) requestTokenWithKubernetesAuth(ctx context.Context, client Clie
 	}
 
 	return token, nil
+}
+
+func getJwtString(ctx context.Context, v *client, kubernetesAuth *esv1alpha1.VaultKubernetesAuth) (string, error) {
+	if kubernetesAuth.ServiceAccountRef != nil {
+		jwt, err := v.secretKeyRefForServiceAccount(ctx, kubernetesAuth.ServiceAccountRef)
+		if err != nil {
+			return "", err
+		}
+		return jwt, nil
+	} else if kubernetesAuth.SecretRef != nil {
+		tokenRef := kubernetesAuth.SecretRef
+		if tokenRef.Key == "" {
+			tokenRef = kubernetesAuth.SecretRef.DeepCopy()
+			tokenRef.Key = "token"
+		}
+		jwt, err := v.secretKeyRef(ctx, tokenRef)
+		if err != nil {
+			return "", err
+		}
+		return jwt, nil
+	} else {
+		// Kubernetes authentication is specified, but without a referenced
+		// Kubernetes secret. We check if the file path for in-cluster service account
+		// exists and attempt to use the token for Vault Kubernetes auth.
+		if _, err := os.Stat(serviceAccTokenPath); err != nil {
+			return "", fmt.Errorf(errServiceAccount, err)
+		}
+		jwtByte, err := ioutil.ReadFile(serviceAccTokenPath)
+		if err != nil {
+			return "", fmt.Errorf(errServiceAccount, err)
+		}
+		return string(jwtByte), nil
+	}
 }
 
 func (v *client) requestTokenWithLdapAuth(ctx context.Context, client Client, ldapAuth *esv1alpha1.VaultLdapAuth) (string, error) {

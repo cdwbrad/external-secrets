@@ -36,7 +36,11 @@ var _ = Describe("[gcp] ", func() {
 	f := framework.New("eso-gcp")
 	credentials := os.Getenv("GCP_SM_SA_JSON")
 	projectID := os.Getenv("GCP_PROJECT_ID")
-	prov := newgcpProvider(f, credentials, projectID)
+	prov := &gcpProvider{}
+
+	if credentials != "" && projectID != "" {
+		prov = newgcpProvider(f, credentials, projectID)
+	}
 
 	// P12Cert case creates a secret with a p12 cert containing a privkey and cert bundled together.
 	// It uses templating to generate a k8s secret of type tls with pem values
@@ -150,6 +154,8 @@ x6HaRh+EUwU51von6M9lEF9/p5Q=
 		Entry(common.DataPropertyDockerconfigJSON(f)),
 		Entry(common.SSHKeySync(f)),
 		Entry(common.SSHKeySyncDataProperty(f)),
+		Entry(common.SyncWithoutTargetName(f)),
+		Entry(common.JSONDataWithoutTargetName(f)),
 		Entry("should sync p12 encoded cert secret", p12Cert),
 	)
 })
